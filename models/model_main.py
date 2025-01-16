@@ -228,27 +228,35 @@ class ModelMain(QObject):
         )
         self.thread_pool.start(runnable)
 
-    def send_wechat_message_auto(self, message_info: dict, check_pause, updatedProgressSignal):
+    def send_wechat_message_auto(self, message_info: dict, check_pause=None, updatedProgressSignal=None):
         """发送微信消息"""
-        task_id = 'send_msg_auto'
-        if self.task_status_map.get(task_id):
-            print('任务正在执行')
-            return
-        self.toggleTaskStatusSignal.emit(task_id)
+        try:
+            task_id = 'send_msg_auto'
+            # 移除任务状态检查，因为我们需要连续处理多条消息
+            # if self.task_status_map.get(task_id):
+            #     print('任务正在执行')
+            #     return
+            
+            self.toggleTaskStatusSignal.emit(task_id)
 
-        runnable = SendMessageTaskAuto(
-            self.wx.send_msg,
-            task_id=task_id,
-            check_pause=check_pause,
-            message_info=self.process_message_info(message_info=message_info),
-            updatedProgressSignal=updatedProgressSignal,
-            toggleTaskStatusSignal=self.toggleTaskStatusSignal,
-            recordExecInfoSignal=self.recordExecInfoSignal,
-            showInfoBarSignal=self.showInfoBarSignal,
-            cacheProgressSignal=self.cacheProgressSignal,
-            deleteCacheProgressSignal=self.deleteCacheProgressSignal
-        )
-        self.thread_pool.start(runnable)
+            runnable = SendMessageTaskAuto(
+                self.wx.send_msg,
+                task_id=task_id,
+                check_pause=check_pause,
+                message_info=self.process_message_info(message_info=message_info),
+                updatedProgressSignal=updatedProgressSignal,
+                toggleTaskStatusSignal=self.toggleTaskStatusSignal,
+                recordExecInfoSignal=self.recordExecInfoSignal,
+                showInfoBarSignal=self.showInfoBarSignal,
+                cacheProgressSignal=self.cacheProgressSignal,
+                deleteCacheProgressSignal=self.deleteCacheProgressSignal
+            )
+            self.thread_pool.start(runnable)
+            return True
+            
+        except Exception as e:
+            print(f"发送消息时出错: {str(e)}")
+            return False
 
     @staticmethod
     def process_message_info(message_info):
@@ -276,4 +284,7 @@ class ModelMain(QObject):
 
     @Slot(bool)
     def change_task_status(self, task_id):
-        self.task_status_map[task_id] = not self.task_status_map.get(task_id)
+        """修改任务状态处理方法"""
+        # 对于自动发送任务，不更新状态
+        if task_id != 'send_msg_auto':
+            self.task_status_map[task_id] = not self.task_status_map.get(task_id)

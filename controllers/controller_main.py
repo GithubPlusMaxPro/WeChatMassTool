@@ -7,7 +7,8 @@ from copy import deepcopy
 import requests
 import time
 
-from PySide6.QtCore import (QObject, QMutexLocker, QMutex, QWaitCondition, Slot, QThread, Signal)
+from PySide6.QtCore import (QObject, QMutexLocker, QMutex, QWaitCondition, 
+                           Slot, QThread, Signal, Qt)
 from PySide6.QtWidgets import (QFileDialog, QMessageBox)
 
 from config import (Animate, WeChat, TUTORIAL_LINK)
@@ -20,6 +21,7 @@ from views import ViewMain
 
 
 class ControllerMain(QObject):
+    messageProcessed = Signal()  # 添加新的信号用于通知消息处理完成
 
     def __init__(self, animate_on_startup=True, parent=None):
         super().__init__(parent)
@@ -37,6 +39,10 @@ class ControllerMain(QObject):
         self.sha256_cache_file = str()
         self.init_animate_radio_btn(flag=animate_on_startup)
         self.auto_send_thread = None
+        self.messageProcessed.connect(self.continue_auto_send)  # 连接新的槽函数
+        self.total_messages = 0
+        self.current_message_index = 0
+        self.messages_cache = []
 
     def setup_connections(self):
         # 发送消息
@@ -201,13 +207,59 @@ class ControllerMain(QObject):
         
     def handle_auto_send_data(self, data):
         """处理收到的数据"""
-        formatted_data = self.get_gui_info_auto(data)
-        self.model.send_wechat_message_auto(
-            formatted_data,
-            check_pause=self.check_pause,
-            updatedProgressSignal=self.view.updatedProgressSignal,
-        )
+        try:
+            # 记录总消息数和当前处理的索引
+            self.total_messages = len(data)
+            self.current_message_index = 0
+            self.messages_cache = data  # 保存消息缓存
+            
+            # 处理第一条消息
+            self.process_next_message(data)
+            
+        except Exception as e:
+            print(f"处理消息时出错: {str(e)}")
+            self.messageProcessed.emit()  # 出错时继续下一轮
+
+    def process_next_message(self, messages):
+        """处理下一条消息"""
+        try:
+            if self.current_message_index < self.total_messages:
+                message = messages[self.current_message_index]
+                formatted_data = self.get_gui_info_auto(message)
+                
+                # 连接一次性槽函数来处理消息发送完成
+                self.model.showInfoBarSignal.connect(self.on_message_sent, type=Qt.SingleShotConnection)
+                
+                self.model.send_wechat_message_auto(
+                    formatted_data,
+                    check_pause=self.check_pause,
+                    updatedProgressSignal=self.view.updatedProgressSignal,
+                )
+            else:
+                # 所有消息都处理完成，发出信号继续下一轮
+                self.messageProcessed.emit()
+                
+        except Exception as e:
+            print(f"处理消息时出错: {str(e)}")
+            self.messageProcessed.emit()
+
+    def on_message_sent(self, success, message):
+        """消息发送完成的回调"""
+        # 断开信号连接
+        try:
+            self.model.showInfoBarSignal.disconnect(self.on_message_sent)
+        except:
+            pass
         
+        if success:
+            print(f"消息 {self.current_message_index + 1}/{self.total_messages} 发送成功")
+        else:
+            print(f"消息 {self.current_message_index + 1}/{self.total_messages} 发送失败: {message}")
+        
+        # 处理下一条消息
+        self.current_message_index += 1
+        self.process_next_message(self.messages_cache)
+
     def handle_auto_send_error(self, error_msg):
         """处理错误信息"""
         print(f'请求发生错误: {error_msg}')
@@ -304,15 +356,23 @@ class ControllerMain(QObject):
     def delete_cache_progress(self, item):
         delete_file(self.sha256_cache_file)
 
+    def continue_auto_send(self):
+        """继续自动发送的槽函数"""
+        if self.auto_send_thread and self.auto_send_thread.isRunning():
+            self.auto_send_thread.resume()
+
 
 class AutoSendThread(QThread):
-    dataReceived = Signal(dict)
+    dataReceived = Signal(list)
     error = Signal(str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self._stop = False
-        self._interval = 0.1  # 将请求间隔从1秒改为0.1秒
+        self._interval = 0.1
+        self._paused = False  # 添加暂停标志
+        self._pause_mutex = QMutex()
+        self._pause_condition = QWaitCondition()
         
     def run(self):
         url = "https://sf-erp.xtli.cc/sys/worktool/createMockData"
@@ -323,20 +383,35 @@ class AutoSendThread(QThread):
                 if response.status_code == 200:
                     response_data = response.json()
                     if response_data.get('status') == 200:
-                        data = response_data.get('data', [])
-                        self.dataReceived.emit(data)
+                        messages = response_data.get('data', [])
+                        print(messages)
+                        if messages:
+                            self.dataReceived.emit(messages)
+                            # 发送数据后暂停等待处理完成
+                            self._pause()
                     else:
                         self.error.emit(f'数据格式错误: {response_data}')
                 
-                time.sleep(self._interval)  # 使用较短的间隔时间
+                time.sleep(self._interval)
                 
             except Exception as e:
                 self.error.emit(str(e))
-                time.sleep(1)  # 错误时的等待时间也缩短到1秒
+                time.sleep(1)
+    
+    def _pause(self):
+        """暂停线程执行"""
+        with QMutexLocker(self._pause_mutex):
+            self._paused = True
+            while self._paused and not self._stop:
+                self._pause_condition.wait(self._pause_mutex)
+    
+    def resume(self):
+        """恢复线程执行"""
+        with QMutexLocker(self._pause_mutex):
+            self._paused = False
+            self._pause_condition.wakeAll()
                 
     def stop(self):
+        """停止线程"""
         self._stop = True
-
-    def set_interval(self, seconds):
-        """设置请求间隔时间"""
-        self._interval = seconds
+        self.resume()  # 确保线程能够退出
