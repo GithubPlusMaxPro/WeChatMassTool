@@ -4,8 +4,10 @@
 # Date:         2024/04/01 00:00
 # Description:
 from copy import deepcopy
+import requests
+import time
 
-from PySide6.QtCore import (QObject, QMutexLocker, QMutex, QWaitCondition, Slot)
+from PySide6.QtCore import (QObject, QMutexLocker, QMutex, QWaitCondition, Slot, QThread, Signal)
 from PySide6.QtWidgets import (QFileDialog, QMessageBox)
 
 from config import (Animate, WeChat, TUTORIAL_LINK)
@@ -34,11 +36,15 @@ class ControllerMain(QObject):
         self.name_list_file = str()
         self.sha256_cache_file = str()
         self.init_animate_radio_btn(flag=animate_on_startup)
+        self.auto_send_thread = None
 
     def setup_connections(self):
         # 发送消息
         self.view.btn_send_msg.clicked.connect(self.on_send_clicked)
         self.view.btn_pause_send.clicked.connect(self.toggle_send_status)
+
+        # 自动发送开始
+        self.view.btn_send_msg_2.clicked.connect(self.on_send_clicked_auto)
         # 清空控件
         self.view.btn_clear_msg.clicked.connect(self.view.clear_msg_text_edit)
         self.view.btn_clear_name.clicked.connect(self.clear_name_actions)
@@ -85,6 +91,32 @@ class ControllerMain(QObject):
             'names': names,
             'name_list': deepcopy(self.name_list),
             'text_name_list_count': len(self.name_list),
+            'add_remark_name': add_remark_name,
+            'at_everyone': at_everyone,
+            'text_interval': text_interval,
+            'file_interval': file_interval,
+            'send_shortcut': send_shortcut
+        }
+    
+    
+    def get_gui_info_auto(self, item):
+        """获取当前面板填写的信息"""
+        single_text = ''
+        multi_text = item['message']
+        files = []
+        names = item['wechat_group']
+        add_remark_name = False
+        at_everyone = False
+        text_interval = 0.1  # 将文本发送间隔改为0.1秒
+        file_interval = 0.1  # 将文件发送间隔改为0.1秒
+        send_shortcut = '{Enter}' if self.view.radio_btn_enter.isChecked() else '{Ctrl}{Enter}'
+        return {
+            'single_text': single_text,
+            'multi_text': multi_text,
+            'file_paths': files,
+            'names': names,
+            'name_list': [],
+            'text_name_list_count': 0,
             'add_remark_name': add_remark_name,
             'at_everyone': at_everyone,
             'text_interval': text_interval,
@@ -143,15 +175,43 @@ class ControllerMain(QObject):
         """点击发送按钮触发的事件"""
         data = self.get_gui_info()
         print(data)
-
+        print('11111测试嘤嘤嘤')
         if cache_index := self.get_name_list_file_cache_index():
             data['cache_index'] = cache_index
-
+        print(data)
         self.model.send_wechat_message(
             data,
             check_pause=self.check_pause,
             updatedProgressSignal=self.view.updatedProgressSignal,
         )
+
+
+    def on_send_clicked_auto(self):
+        """点击自动发送按钮触发的事件"""
+        if self.auto_send_thread and self.auto_send_thread.isRunning():
+            self.auto_send_thread.stop()
+            self.view.btn_send_msg_2.setText("开始自动发送")
+            return
+            
+        self.auto_send_thread = AutoSendThread(self)
+        self.auto_send_thread.dataReceived.connect(self.handle_auto_send_data)
+        self.auto_send_thread.error.connect(self.handle_auto_send_error)
+        self.auto_send_thread.start()
+        self.view.btn_send_msg_2.setText("停止自动发送")
+        
+    def handle_auto_send_data(self, data):
+        """处理收到的数据"""
+        formatted_data = self.get_gui_info_auto(data)
+        self.model.send_wechat_message_auto(
+            formatted_data,
+            check_pause=self.check_pause,
+            updatedProgressSignal=self.view.updatedProgressSignal,
+        )
+        
+    def handle_auto_send_error(self, error_msg):
+        """处理错误信息"""
+        print(f'请求发生错误: {error_msg}')
+        self.view.show_message_box('数据格式错误!', QMessageBox.Critical, duration=3000)
 
     def check_pause(self):
         """检查暂停"""
@@ -243,3 +303,40 @@ class ControllerMain(QObject):
     @Slot(bool)
     def delete_cache_progress(self, item):
         delete_file(self.sha256_cache_file)
+
+
+class AutoSendThread(QThread):
+    dataReceived = Signal(dict)
+    error = Signal(str)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop = False
+        self._interval = 0.1  # 将请求间隔从1秒改为0.1秒
+        
+    def run(self):
+        url = "https://sf-erp.xtli.cc/sys/worktool/createMockData"
+        
+        while not self._stop:
+            try:
+                response = requests.get(url)
+                if response.status_code == 200:
+                    response_data = response.json()
+                    if response_data.get('status') == 200:
+                        data = response_data.get('data', [])
+                        self.dataReceived.emit(data)
+                    else:
+                        self.error.emit(f'数据格式错误: {response_data}')
+                
+                time.sleep(self._interval)  # 使用较短的间隔时间
+                
+            except Exception as e:
+                self.error.emit(str(e))
+                time.sleep(1)  # 错误时的等待时间也缩短到1秒
+                
+    def stop(self):
+        self._stop = True
+
+    def set_interval(self, seconds):
+        """设置请求间隔时间"""
+        self._interval = seconds

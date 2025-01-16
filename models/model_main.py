@@ -84,6 +84,51 @@ class SendMessageTask(TaskRunnable):
             # 通知更新进度条
             updatedProgressSignal.emit(idx + 1, len(name_list))  # 通知控制器任务完成
 
+class SendMessageTaskAuto(TaskRunnable):
+    def execute_task(self):
+        # 实现发送消息的逻辑
+        message_info = self.kwargs.get('message_info')
+        check_pause = self.kwargs.get('check_pause')
+        updatedProgressSignal = self.kwargs.get('updatedProgressSignal')
+        recordExecInfoSignal = self.kwargs.get('recordExecInfoSignal')
+        showInfoBarSignal = self.kwargs.get('showInfoBarSignal')
+        cacheProgressSignal = self.kwargs.get('cacheProgressSignal')
+        deleteCacheProgressSignal = self.kwargs.get('deleteCacheProgressSignal')
+        #
+        name_list = message_info.pop('name_list')
+        cache_index = int(message_info.pop('cache_index', int(0)))
+        text_name_list_count = int(message_info.pop('text_name_list_count', int(0)))
+        #
+        texts = '\n'.join(message_info.get('msgs', str()))
+        files = '\n'.join(message_info.get('file_paths', str()))
+        #
+        exec_info_map = dict()
+        infobar_info = [0, 0]
+        # 首先更新 progress 进度条
+        updatedProgressSignal.emit(0, len(name_list))
+        #
+        for idx, name in enumerate(name_list):
+            # 不满足 (不存在缓存进度索引 和 当前索引小于进度索引) 就往下执行, 用于跳过以发送的用户
+            if not (cache_index and idx <= cache_index):
+                check_pause()  # 检查程序是否暂停
+                try:
+                    exec_info_map.update({'昵称': name, '文本': texts, '文件': files, '状态': '成功'})
+                    self.func(name, **message_info)
+                    infobar_info = [True, f'{name[:8]} 发送成功']
+                except (ValueError, TypeError, AssertionError, NameError) as e:
+                    exec_info_map.update({'状态': '失败', '备注': str(e)})
+                    infobar_info = [False, f'{name[:8]} {str(e)}']
+                finally:
+                    recordExecInfoSignal.emit(exec_info_map)
+                    showInfoBarSignal.emit(*infobar_info)
+                    # 触发缓存文件保存文件操作
+                    if text_name_list_count > (idx + 1):
+                        cacheProgressSignal.emit(str(idx))
+                    # 触发删除缓存进度索引文件
+                    if text_name_list_count == (idx + 1):
+                        deleteCacheProgressSignal.emit(True)
+            # 通知更新进度条
+            updatedProgressSignal.emit(idx + 1, len(name_list))  # 通知控制器任务完成
 
 class GetNameListTask(TaskRunnable):
     def execute_task(self):
@@ -165,10 +210,33 @@ class ModelMain(QObject):
         """发送微信消息"""
         task_id = 'send_msg'
         if self.task_status_map.get(task_id):
+            print('任务正在执行')
             return
         self.toggleTaskStatusSignal.emit(task_id)
 
         runnable = SendMessageTask(
+            self.wx.send_msg,
+            task_id=task_id,
+            check_pause=check_pause,
+            message_info=self.process_message_info(message_info=message_info),
+            updatedProgressSignal=updatedProgressSignal,
+            toggleTaskStatusSignal=self.toggleTaskStatusSignal,
+            recordExecInfoSignal=self.recordExecInfoSignal,
+            showInfoBarSignal=self.showInfoBarSignal,
+            cacheProgressSignal=self.cacheProgressSignal,
+            deleteCacheProgressSignal=self.deleteCacheProgressSignal
+        )
+        self.thread_pool.start(runnable)
+
+    def send_wechat_message_auto(self, message_info: dict, check_pause, updatedProgressSignal):
+        """发送微信消息"""
+        task_id = 'send_msg_auto'
+        if self.task_status_map.get(task_id):
+            print('任务正在执行')
+            return
+        self.toggleTaskStatusSignal.emit(task_id)
+
+        runnable = SendMessageTaskAuto(
             self.wx.send_msg,
             task_id=task_id,
             check_pause=check_pause,
